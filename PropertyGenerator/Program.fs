@@ -1,5 +1,6 @@
-open System;
+﻿open System;
 open System.IO;
+open System.Text.RegularExpressions;
 
 let get_string fileName=
     File.ReadAllText(fileName)
@@ -12,13 +13,6 @@ let make_friendly_name (value:String)=
             else yield value.[i]}|>Seq.where(fun r->r<>'_')|>String.Concat
     result
 
-
-let (|Prefix|_|) (p:string) (s:string) =
-    if s.StartsWith(p) then
-        Some(p)
-    else
-        None
-
 let make_nullable (value:string,modif:string[])=
     let test v=(v="not_null")
     if Seq.exists test modif then
@@ -26,36 +20,54 @@ let make_nullable (value:string,modif:string[])=
     else
         value+"?"
 
+let get_type_info (value:string)=
+    let components=Regex.Match(value,"^(?<type>[a-z_]*)(\((?<value>[0-9,]*)\))*$")
+    (components.Groups.["type"].Value, components.Groups.["value"].Value)
+
 let get_type (value:string, modifiers:string[])=
     let clean=value.ToLowerInvariant().Trim().Replace(" ","")
-    let result=match clean with
-                |Prefix "date" v->make_nullable("DateTime",modifiers)
-                |Prefix "datetime" v->make_nullable("DateTime",modifiers)
-                |Prefix "int" v->make_nullable("int",modifiers)
-                |Prefix "char(1)" v->make_nullable("bool",modifiers)
-                |Prefix "char" v->"string"
-                |Prefix "varchar" v-> "string"
-                |Prefix "decimal" v-> make_nullable("decimal",modifiers)
-                |Prefix "tinyint" v-> make_nullable("int",modifiers)
-                |Prefix "time" v->make_nullable("DateTime",modifiers)
-                |Prefix "bit" v->make_nullable("bool",modifiers)                
-                |_->"None"
+    let type_info=get_type_info clean
+    let result=match type_info with
+                |("date",_) ->(make_nullable("DateTime",modifiers),"","")
+                |("datetime",_)->(make_nullable("DateTime",modifiers),"","")
+                |("int",_)->(make_nullable("int",modifiers),"","")
+                |("char","1")->(make_nullable("bool",modifiers),"","")
+                |("char",v)->("string","nvarchar",v)
+                |("varchar",v)->("string","nvarchar",v)
+                |("decimal",_)->(make_nullable("decimal",modifiers),"","")
+                |("tinyint","1")->(make_nullable("bool",modifiers),"","")
+                |("tinyint",_)->(make_nullable("int",modifiers),"","")
+                |("time",_)->(make_nullable("DateTime",modifiers),"","")
+                |("bit",_)->(make_nullable("bool",modifiers),"","")
+                |("text",_)->("string","text","")
+                |("smallint",_)->(make_nullable("int",modifiers),"","")
+                |_->("None","","")
     result
 
 let string_to_tuple (value:String)=
     let components=value.Split([|' '|])
     (make_friendly_name components.[0], get_type (components.[1],components.[2..]))
 
+let gen_property (name:String, ptype:String*String*String)=  
+    match ptype with
+        |(ct,dt,s)->
+            let columnAttr=if String.IsNullOrEmpty(dt) then "" else String.Format("[Column(TypeName=\"{0}\")]{1}", dt,Environment.NewLine)
+            let sizeAttr=if String.IsNullOrEmpty(s) then "" else String.Format("[MaxLength({0})]{1}",s, Environment.NewLine)
+            String.Format("{2}{3}public {0} {1} {{ get; set;}}", ct,name,columnAttr,sizeAttr)
+        
 let analyze (s:string)=
     s.Split([|"\r\n"|],StringSplitOptions.RemoveEmptyEntries)
     |>Seq.map(fun s->s.Trim())
     |>Seq.map(fun s-> string_to_tuple s)
-    |>Seq.map(fun (n,t)->String.Format("public {0} {1} {{ get; set;}}", t,n))
+    |>Seq.map gen_property
     |>String.concat (Environment.NewLine+Environment.NewLine);
 
+let write_to_file (file:String) (value:String)=
+    File.WriteAllText(file,value)  
+
 [<EntryPoint>]
-let main argv = 
-    let files=[|("Vehicle.txt","VehicleOut.txt");("VehicleSpec.txt","VehicleSpecOut.txt")|]
-    let result=files|>Seq.map (fun (t,d)->t)|>Seq.map get_string |> Seq.map analyze
-    Seq.zip files result|>Seq.map (fun((s,t),r)->(t,r))|>Seq.iter(fun (f,r)->File.WriteAllText(f,r))
-    0 // return an integer exit code
+let main argv =         
+    let files=[|"Vehicle.txt";"VehicleSpec.txt"|]
+    let resultFile="VehicleOut.txt"
+    let res=files|>Seq.map get_string |> Seq.map analyze|>String.concat Environment.NewLine|>write_to_file resultFile    
+    0
